@@ -11,85 +11,49 @@ project("{}")
   kind("StaticLib")
   language("C")
   ffmpeg_common()
+
+  filter("files:not wmaprodec.c")
+    warnings "Off"
+  filter({{}})
 """
 
 templates = {}
-templates['libavutil'] = template_header.format('libavutil', '19216035-F781-4F15-B009-213B7E3A18AC') + """
-  filter("platforms:Windows")
-    buildoptions({
-      "/wd4018", -- signed/unsigned mismatch
-      "/wd4028", -- formal parameter 3 different from declaration
-      "/wd4090", -- different const qualifiers
-      "/wd4101", -- unreferenced local variable
-      "/wd4133", -- incompatible types
-      "/wd4146", -- unary minus operator applied to unsigned type, result still unsigned
-      "/wd4244", -- conversion 'x' to 'x', possible loss of data
-      "/wd4267", -- 'initializing': conversion from 'x' to 'x', possible loss of data
-      "/wd4305", -- 'initializing': truncation from 'x' to 'x'
-      "/wd4333", -- right shift by too large amount, data loss
-      "/wd4554", -- check operator precedence for possible error
-    })
-  filter("platforms:Linux")
-    buildoptions({
-      "-Wno-error=implicit-const-int-float-conversion",
-      "-Wno-error=incompatible-pointer-types-discards-qualifiers",
-      "-Wno-error=switch",
-      "-Wno-error=incompatible-pointer-types",
-      "-Wno-error=logical-op-parentheses",
-      "-Wno-error=pointer-sign",
-      "-Wno-error=parentheses",
-      "-Wno-error=string-plus-int",
-      "-Wno-error=tautological-constant-out-of-range-compare",
-    })
-  filter {}
-
-"""
+templates['libavutil'] = template_header.format('libavutil', '19216035-F781-4F15-B009-213B7E3A18AC')
 
 templates['libavcodec'] =  template_header.format('libavcodec', '9DB2830C-D326-48ED-B4CC-08EA6A1B7272') + """
-  filter("platforms:Windows")
-    buildoptions({
-      "/wd4003", --	not enough arguments for function-like macro invocation
-      "/wd4013", -- undefined; assuming extern returning int
-      "/wd4018", -- signed/unsigned mismatch
-      "/wd4028", -- formal parameter 3 different from declaration
-      "/wd4047", -- 'initializing': 'x' differs in levels of indirection from 'x'
-      "/wd4087",
-      "/wd4089", -- different types in actual parameter x, formal parameter x
-      "/wd4090", -- different const qualifiers
-      "/wd4101", -- unreferenced local variable
-      "/wd4113",
-      "/wd4133", -- incompatible types
-      "/wd4146", -- unary minus operator applied to unsigned type, result still unsigned
-      "/wd4244", -- conversion 'x' to 'x', possible loss of data
-      "/wd4267", -- 'initializing': conversion from 'x' to 'x', possible loss of data
-      "/wd4305", -- 'initializing': truncation from 'x' to 'x'
-      "/wd4334", -- result of 32-bit shift implicitly converted to 64 bits
-      "/wd4554", -- check operator precedence for possible error
-      "/wd4996", -- was declared deprecated
-    })
-  filter("platforms:Linux")
-    buildoptions({
-      "-Wno-error=implicit-const-int-float-conversion",
-      "-Wno-error=incompatible-pointer-types-discards-qualifiers",
-      "-Wno-error=switch",
-      "-Wno-error=incompatible-pointer-types",
-      "-Wno-error=pointer-sign",
-      "-Wno-error=parentheses",
-      "-Wno-error=string-plus-int",
-      "-Wno-error=deprecated-declarations",
-    })
-  filter {}
   links({
     "libavutil",
   })
-
 """
+class Config():
+    def __init__(self, os, arch, config_h, premake_filters):
+        self.os = os
+        self.arch = arch
+        self.config_h = config_h
+        self.premake_filters = premake_filters
+        self.key_values = []
+
+supported_configs = [
+    Config('windows', 'x86_64' , 'config_windows_x86_64.h' , 'platforms:Windows'),
+    Config('linux'  , 'x86_64' , 'config_linux_x86_64.h'   , 'platforms:Linux'),
+    Config('android', 'x86_64' , 'config_android_x86_64.h' , 'platforms:Android-x86_64'),
+    Config('android', 'aarch64', 'config_android_aarch64.h', 'platforms:Android-ARM64'),
+]
+
+def are_list_items_identical(list_a, list_b):
+    set_a = set(list_a)
+    if len(set_a) != len(list_b):
+        return False
+    for a in set_a:
+        if a not in list_b:
+            return False
+    return True
 
 # gets the config defines from the generated header
-def get_conf():
+def parse_config(file_name):
     conf = {}
     # platform configs mostly differ in HAVE_*, which we are not interested in
-    with open('config_win.h', 'r') as c:
+    with open(file_name, 'r') as c:
         for line in c:
             split = line.rstrip().split(' ' , 2)
             if len(split) != 3:
@@ -107,6 +71,10 @@ def get_conf():
                     pass
             conf[key] = val
     return conf
+
+def parse_configs():
+    for config in supported_configs:
+        config.key_values = parse_config(config.config_h)
 
 # Adapted from distutils.sysconfig.parse_makefile
 # Regexes needed for parsing Makefile (and similar syntaxes,
@@ -215,46 +183,123 @@ def parse_makefile(fn, conf, g=None):
     g.update(done)
     return g
 
-
-def premake_files(files):
+def premake_files(files, libname):
+    # .o rule order from ffbuild:
+    extensions = [
+        '.c',
+        '.cpp',
+        '.m',
+        '.S',
+        '.asm',
+        '.rc',
+    ]
     s = '  files({\n'
     for f in files:
-        # will break on asm files
-        f = re.sub('.o$', '.c', f)
+        match = re.search('^(.*).o$', f)
+        if match:
+            for ext in extensions:
+                f2 = match.group(1) + ext
+                if os.path.exists(os.path.join(libname, f2)):
+                    f = f2
+                    break
+            if f.endswith('.o'):
+                print('Error: could not resolve source for OBJ "{}".'.format(f))
         s += '    "{}",\n'.format(f)
     s += '  })\n'
     return s
 
+def premake_filter(filters = None):
+    f = '  filter({'
+    if filters and len(filters):
+        f += '"'
+        # Concatenate sorted (for consistency) filters
+        f += ' or '.join(sorted(filters))
+        f += '"'
+    f += '})\n'
+    return f
 
-def generate_premake(conf, libname):
+def generate_premake(configs, libname):
     M = 'Makefile'
+
     makefiles = [
-        os.path.join(libname, M),
-        os.path.join(libname, 'aarch64', M),
-        os.path.join(libname, 'x86', M),
+        (os.path.join(libname, M)           , configs),
+        # Original Makefiles are always included but since symbols are never used we can ignore them:
+        (os.path.join(libname, 'aarch64', M), list(filter(lambda config: config.arch == 'aarch64', configs))),
+        (os.path.join(libname, 'x86' , M)   , list(filter(lambda config: config.arch == 'x86_64', configs))),
     ]
+
+    # Makefile variables that contain source files - conditionals from arch.mak
+    file_blocks = [
+        ('HEADERS'          , None),
+        ('ARCH_HEADERS'     , None),
+        ('BUILT_HEADERS'    , None),
+        ('OBJS'             , None),
+
+        ('ARMV5TE-OBJS'     , 'HAVE_ARMV5TE'),
+        ('ARMV6-OBJS'       , 'HAVE_ARMV6'),
+        ('ARMV8-OBJS'       , 'HAVE_ARMV8'),
+        ('VFP-OBJS'         , 'HAVE_VFP'),
+        ('NEON-OBJS'        , 'HAVE_NEON'),
+
+        ('MMX-OBJS'         , 'HAVE_MMX'),
+        ('X86ASM-OBJS'      , 'HAVE_X86ASM'),
+    ]
+
+    # Cache tree of parsed makefile variables
+    ms = {}
+    for makefile in makefiles:
+        ms2 = {}
+        for config in configs:
+            ms2[config] = parse_makefile(makefile[0], config.key_values)
+        ms[makefile[0]] = ms2
+
     with open(os.path.join(libname, 'premake5.lua'), 'w') as premake:
         premake.write(templates[libname])
-        files = []
         for makefile in makefiles:
-            m = parse_makefile(makefile, conf)
-            file_blocks = [
-                'HEADERS',
-                'ARCH_HEADERS',
-                'BUILT_HEADERS',
-                'OBJS',
-                'MMX-OBJS',
-            ]
+            premake.write('\n  -- {}:\n'.format(makefile[0].replace('\\', '/')))
             for file_block in file_blocks:
-                for _ in range(2):
-                    if file_block in m:
-                        premake.write('  -- {}:\n'.format(makefile.replace('\\', '/')))
-                        premake.write('  --   {}:\n'.format(file_block))
-                        premake.write(premake_files(m[file_block].split()))
-                    file_block += '-yes'
+                files = {}
+                for config in makefile[1]:
+                    if file_block[1] and ((not file_block[1] in config.key_values) or (not config.key_values[file_block[1]])):
+                        continue
+                    m = ms[makefile[0]][config]
+                    fb = file_block[0]
+                    for _ in range(2):
+                        if fb in m:
+                            for file in m[fb].split():
+                                if file not in files:
+                                    files[file] = { config }
+                                else:
+                                    files[file].add(config)
+                        fb += '-yes' # Evaluated conditionals
 
+                if len(files):
+                    # Get unique config groups
+                    config_sets = []
+                    for file_configs in files.values():
+                        is_new = True
+                        for config_set in config_sets:
+                            if are_list_items_identical(config_set, file_configs):
+                                is_new = False
+                                break
+                        if is_new:
+                            config_sets.append(file_configs)
+                    # Make common files come first
+                    config_sets = sorted(config_sets, key=lambda x: -len(x))
+
+                    premake.write('  --   {}:\n'.format(file_block[0]))
+
+                    # Write file lists with applied filters
+                    filter_used = False
+                    for config_set in config_sets:
+                        if not are_list_items_identical(config_set, configs): # no filter for common files
+                            filter_used = True
+                            premake.write(premake_filter([config.premake_filters for config in config_set]))
+                        premake.write(premake_files([filename for filename, file_configs in files.items() if are_list_items_identical(config_set, file_configs)], libname))
+                    if filter_used:
+                        premake.write(premake_filter())
 
 if __name__ == '__main__':
-    conf =get_conf()
+    parse_configs()
     for libname in templates:
-        generate_premake(conf, libname)
+        generate_premake(supported_configs, libname)
