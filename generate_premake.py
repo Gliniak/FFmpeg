@@ -14,67 +14,87 @@ project("{}")
 
   filter("files:not wmaprodec.c")
     warnings "Off"
-  filter({{}})
 """
 
-templates = {}
-templates['libavutil'] = template_header.format('libavutil', '19216035-F781-4F15-B009-213B7E3A18AC')
 
-templates['libavcodec'] =  template_header.format('libavcodec', '9DB2830C-D326-48ED-B4CC-08EA6A1B7272') + """
-  links({
-    "libavutil",
-  })
-"""
-class Config():
-    def __init__(self, os, arch, config_h, premake_filters):
-        self.os = os
-        self.arch = arch
-        self.config_h = config_h
+class TemplateBuilder:
+    def __init__(self, project_name: str, uuid: str):
+        self.template: str = template_header
+        self.project_name: str = project_name
+        self.uuid: str = uuid
+        self.filters: list = []
+        self.links: list = []
+
+        self.output: str = ""
+
+    def build(self) -> str:
+        self.output = template_header.format(self.project_name, self.uuid)
+        if self.filters:
+            filters_str = "\n    ".join(f'"{filter}",' for filter in self.filters)
+            self.output += "\n  filter({{ {} }})".format(filters_str)
+
+        if self.links:
+            links_str = "\n    ".join(f'"{link}",' for link in self.links)
+            self.output += "\n  links({{ \n    {} \n  }})".format(links_str)
+
+        return self.output
+
+    def add_filter(self, filter_name: str):
+        self.filters.append(filter_name)
+        return self
+
+    def add_link(self, link_name: str):
+        self.links.append(link_name)
+        return self
+
+
+templates = {
+    'libavutil': TemplateBuilder('libavutil', '19216035-F781-4F15-B009-213B7E3A18AC').build(),
+    'libavcodec': TemplateBuilder('libavcodec', '9DB2830C-D326-48ED-B4CC-08EA6A1B7272').add_link("libavutil").build(),
+    'libavformat': TemplateBuilder('libavformat', '9DB2830C-D326-48ED-B4CC-08EA6A1B7273').build()
+}
+
+
+class Config:
+    def __init__(self, os_type, architecture_type, config_h, premake_filters):
+        self.os_type = os_type
+        self.architecture_type = architecture_type
+        self.config_header_file_name = config_h
         self.premake_filters = premake_filters
         self.key_values = []
 
+
 supported_configs = [
-    Config('windows', 'x86_64' , 'config_windows_x86_64.h' , 'platforms:Windows'),
-    Config('linux'  , 'x86_64' , 'config_linux_x86_64.h'   , 'platforms:Linux'),
-    Config('android', 'x86_64' , 'config_android_x86_64.h' , 'platforms:Android-x86_64'),
+    Config('windows', 'x86_64', 'config_windows_x86_64.h', 'platforms:Windows'),
+    Config('linux', 'x86_64', 'config_linux_x86_64.h', 'platforms:Linux'),
+    Config('android', 'x86_64', 'config_android_x86_64.h', 'platforms:Android-x86_64'),
     Config('android', 'aarch64', 'config_android_aarch64.h', 'platforms:Android-ARM64'),
 ]
 
-def are_list_items_identical(list_a, list_b):
-    set_a = set(list_a)
-    if len(set_a) != len(list_b):
-        return False
-    for a in set_a:
-        if a not in list_b:
-            return False
-    return True
+
+def are_list_items_identical(list_a: set, list_b: set):
+    return list_a == list_b
+
 
 # gets the config defines from the generated header
-def parse_config(file_name):
-    conf = {}
+def parse_config(file_path: str):
+    config: Dict[str, str] = {}
     # platform configs mostly differ in HAVE_*, which we are not interested in
-    with open(file_name, 'r') as c:
-        for line in c:
-            split = line.rstrip().split(' ' , 2)
-            if len(split) != 3:
+    with open(file_path, 'r') as file:
+        for line in file:
+            split = line.rstrip().split(' ', 2)
+            if len(split) != 3 or split[0] != '#define':
                 continue
-            if split[0] != '#define':
-                continue
-            key = split[1]
-            val = split[2]
-            if val[0] == '"' and val[-1] == '"':
-                val = val[1:-1]
-            else:
-                try:
-                    val = int(val)
-                except ValueError:
-                    pass
-            conf[key] = val
-    return conf
+
+            config[split[1]] = split[2].strip('"')
+
+    return config
+
 
 def parse_configs():
     for config in supported_configs:
-        config.key_values = parse_config(config.config_h)
+        config.key_values = parse_config(config.config_header_file_name)
+
 
 # Adapted from distutils.sysconfig.parse_makefile
 # Regexes needed for parsing Makefile (and similar syntaxes,
@@ -83,6 +103,8 @@ _variable_rx = re.compile(r"([a-zA-Z][a-zA-Z0-9\-_]+)\s*(\+?)=\s*(.*)")
 _variable_conditional_rx = re.compile(r"([a-zA-Z][a-zA-Z0-9\-_]+)-\$\(([a-zA-Z][a-zA-Z0-9\-_]+)\)\s*(\+?)=\s*(.*)")
 _findvar1_rx = re.compile(r"\$\(([A-Za-z][A-Za-z0-9\-_]*)\)")
 _findvar2_rx = re.compile(r"\${([A-Za-z][A-Za-z0-9\-_]*)}")
+
+
 def parse_makefile(fn, conf, g=None):
     """Parse a Makefile-style file.
 
@@ -116,7 +138,6 @@ def parse_makefile(fn, conf, g=None):
 
             # `$$' is a literal `$' in make
             tmpv = v.replace('$$', '')
-
 
             if cond:
                 boolean = cond in conf and conf[cond]
@@ -183,6 +204,7 @@ def parse_makefile(fn, conf, g=None):
     g.update(done)
     return g
 
+
 def premake_files(files, libname):
     # .o rule order from ffbuild:
     extensions = [
@@ -193,82 +215,98 @@ def premake_files(files, libname):
         '.asm',
         '.rc',
     ]
-    s = '  files({\n'
-    for f in files:
-        match = re.search('^(.*).o$', f)
-        if match:
-            for ext in extensions:
-                f2 = match.group(1) + ext
-                if os.path.exists(os.path.join(libname, f2)):
-                    f = f2
-                    break
-            if f.endswith('.o'):
-                print('Error: could not resolve source for OBJ "{}".'.format(f))
-        s += '    "{}",\n'.format(f)
-    s += '  })\n'
-    return s
+    output_files_list = '  files({\n'
+    for file_name in files:
+        match = re.search('^(.*).o$', file_name)
+        if not match:
+            continue
 
-def premake_filter(filters = None):
-    f = '  filter({'
-    if filters and len(filters):
-        f += '"'
-        # Concatenate sorted (for consistency) filters
-        f += ' or '.join(sorted(filters))
-        f += '"'
-    f += '})\n'
-    return f
+        for ext in extensions:
+            f2 = match.group(1) + ext
+            if os.path.exists(os.path.join(libname, f2)):
+                f = f2
+                break
+        if file_name.endswith('.o'):
+            print('Error: could not resolve source for OBJ "{}".'.format(file_name))
+
+        output_files_list += '    "{}",\n'.format(file_name)
+
+    output_files_list += '  })\n'
+    return output_files_list
+
+
+def premake_filter(filters=None):
+    output_str = '  filter({'
+
+    if filters:
+        output_str += '"{}"'.format(' or '.join(sorted(filters)))
+
+    output_str += '})\n'
+    return output_str
+
+
+MAKEFILE_FILE_NAME = 'Makefile'
+
 
 def generate_premake(configs, libname):
-    M = 'Makefile'
-
-    makefiles = [
-        (os.path.join(libname, M)           , configs),
+    makefiles = {
+        os.path.join(libname, MAKEFILE_FILE_NAME): configs,
         # Original Makefiles are always included but since symbols are never used we can ignore them:
-        (os.path.join(libname, 'aarch64', M), list(filter(lambda config: config.arch == 'aarch64', configs))),
-        (os.path.join(libname, 'x86' , M)   , list(filter(lambda config: config.arch == 'x86_64', configs))),
-    ]
+        os.path.join(libname, 'aarch64', MAKEFILE_FILE_NAME):
+            list(filter(lambda config: config.architecture_type == 'aarch64', configs)),
+        os.path.join(libname, 'x86', MAKEFILE_FILE_NAME):
+            list(filter(lambda config: config.architecture_type == 'x86_64', configs)),
+    }
 
     # Makefile variables that contain source files - conditionals from arch.mak
     file_blocks = [
-        ('HEADERS'          , None),
-        ('ARCH_HEADERS'     , None),
-        ('BUILT_HEADERS'    , None),
-        ('OBJS'             , None),
+        ('HEADERS', None),
+        ('ARCH_HEADERS', None),
+        ('BUILT_HEADERS', None),
+        ('OBJS', None),
 
-        ('ARMV5TE-OBJS'     , 'HAVE_ARMV5TE'),
-        ('ARMV6-OBJS'       , 'HAVE_ARMV6'),
-        ('ARMV8-OBJS'       , 'HAVE_ARMV8'),
-        ('VFP-OBJS'         , 'HAVE_VFP'),
-        ('NEON-OBJS'        , 'HAVE_NEON'),
+        ('ARMV5TE-OBJS', 'HAVE_ARMV5TE'),
+        ('ARMV6-OBJS', 'HAVE_ARMV6'),
+        ('ARMV8-OBJS', 'HAVE_ARMV8'),
+        ('VFP-OBJS', 'HAVE_VFP'),
+        ('NEON-OBJS', 'HAVE_NEON'),
 
-        ('MMX-OBJS'         , 'HAVE_MMX'),
-        ('X86ASM-OBJS'      , 'HAVE_X86ASM'),
+        ('MMX-OBJS', 'HAVE_MMX'),
+        ('X86ASM-OBJS', 'HAVE_X86ASM'),
     ]
 
     # Cache tree of parsed makefile variables
     ms = {}
-    for makefile in makefiles:
+    for makefile_path in makefiles:
+        if not os.path.exists(makefile_path):
+            continue
+
         ms2 = {}
         for config in configs:
-            ms2[config] = parse_makefile(makefile[0], config.key_values)
-        ms[makefile[0]] = ms2
+            ms2[config] = parse_makefile(makefile_path, config.key_values)
+        ms[makefile_path] = ms2
 
     with open(os.path.join(libname, 'premake5.lua'), 'w') as premake:
         premake.write(templates[libname])
-        for makefile in makefiles:
-            premake.write('\n  -- {}:\n'.format(makefile[0].replace('\\', '/')))
+
+        for makefile_path in makefiles:
+            premake.write('\n  -- {}:\n'.format(makefile_path.replace('\\', '/')))
+
             for file_block in file_blocks:
                 files = {}
-                for config in makefile[1]:
-                    if file_block[1] and ((not file_block[1] in config.key_values) or (not config.key_values[file_block[1]])):
+
+                for config in makefiles[makefile_path]:
+                    config.key_values = {}
+                    if file_block[1] and not file_block[1] in config.key_values:
                         continue
-                    m = ms[makefile[0]][config]
+
+                    m = ms[makefile_path][config]
                     fb = file_block[0]
                     for _ in range(2):
                         if fb in m:
                             for file in m[fb].split():
                                 if file not in files:
-                                    files[file] = { config }
+                                    files[file] = {config}
                                 else:
                                     files[file].add(config)
                         fb += '-yes' # Evaluated conditionals
@@ -279,7 +317,7 @@ def generate_premake(configs, libname):
                     for file_configs in files.values():
                         is_new = True
                         for config_set in config_sets:
-                            if are_list_items_identical(config_set, file_configs):
+                            if config_set == file_configs:
                                 is_new = False
                                 break
                         if is_new:
@@ -292,14 +330,16 @@ def generate_premake(configs, libname):
                     # Write file lists with applied filters
                     filter_used = False
                     for config_set in config_sets:
-                        if not are_list_items_identical(config_set, configs): # no filter for common files
+                        if not config_set == configs: # no filter for common files
                             filter_used = True
                             premake.write(premake_filter([config.premake_filters for config in config_set]))
-                        premake.write(premake_files([filename for filename, file_configs in files.items() if are_list_items_identical(config_set, file_configs)], libname))
+                        premake.write(premake_files([filename for filename, file_configs in files.items() if config_set == file_configs], libname))
                     if filter_used:
                         premake.write(premake_filter())
 
+
 if __name__ == '__main__':
     parse_configs()
+
     for libname in templates:
         generate_premake(supported_configs, libname)
