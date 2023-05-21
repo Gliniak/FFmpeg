@@ -1,5 +1,27 @@
 import os
 import re
+from typing import Dict
+from builtins import filter
+
+MAKEFILE_FILE_NAME = 'Makefile'
+
+# Makefile variables that contain source files - conditionals from arch.mak
+file_blocks = [
+    ('HEADERS', None),
+    ('ARCH_HEADERS', None),
+    ('BUILT_HEADERS', None),
+    ('OBJS', None),
+
+    ('ARMV5TE-OBJS', 'HAVE_ARMV5TE'),
+    ('ARMV6-OBJS', 'HAVE_ARMV6'),
+    ('ARMV8-OBJS', 'HAVE_ARMV8'),
+    ('VFP-OBJS', 'HAVE_VFP'),
+    ('NEON-OBJS', 'HAVE_NEON'),
+
+    ('MMX-OBJS', 'HAVE_MMX'),
+    ('X86ASM-OBJS', 'HAVE_X86ASM'),
+]
+
 
 template_header = """
 -----------------------------------------------------------------------
@@ -17,43 +39,81 @@ project("{}")
 """
 
 
-class TemplateBuilder:
+class FileListBuilder:
+    def __init__(self, architecture_name: str, filter_name: str = ""):
+        self.filter_name: str = filter_name
+        self.architecture_name: str = architecture_name  # -- libavutil/Makefile:
+        self.files_by_block_type: Dict[str, list] = {}  # For example: OBJS: "adler32.c"
+
+    def add_file_to_block(self, block_type: str, file_path: str):
+        if not self.files_by_block_type.get(block_type):
+            self.files_by_block_type[block_type] = list()
+
+        self.files_by_block_type[block_type].append(file_path)
+
+    def __hash__(self):
+        return self.files_by_block_type.__hash__
+
+    def __eq__(self, other):
+        return self.files_by_block_type == other.files_by_block_type
+
+    def build(self):
+        output_str = '  -- {}:\n'.format(self.architecture_name)
+
+        for block_type in self.files_by_block_type:
+            output_str += '  --   {}:\n'.format(block_type)
+
+            if self.filter_name:
+                output_str += "\n  filter({{ \n    \"{}\" \n  }})\n".format(self.filter_name)
+
+            output_str += '  files({\n'
+            for file_name in self.files_by_block_type[block_type]:
+                output_str += "    \"{}\",\n".format(file_name)
+
+            output_str += '  })\n'
+
+        return output_str
+
+
+class PremakeFileBuilder:
     def __init__(self, project_name: str, uuid: str):
         self.template: str = template_header
         self.project_name: str = project_name
         self.uuid: str = uuid
-        self.filters: list = []
+        self.files: list[FileListBuilder] = []
         self.links: list = []
 
         self.output: str = ""
 
     def build(self) -> str:
         self.output = template_header.format(self.project_name, self.uuid)
-        if self.filters:
-            filters_str = "\n    ".join(f'"{filter}",' for filter in self.filters)
-            self.output += "\n  filter({{ {} }})".format(filters_str)
 
         if self.links:
             links_str = "\n    ".join(f'"{link}",' for link in self.links)
             self.output += "\n  links({{ \n    {} \n  }})".format(links_str)
 
+        self.output += '\n\n'
+
+        for files_builder in self.files:
+            self.output += files_builder.build()
+
         return self.output
 
-    def add_filter(self, filter_name: str):
-        self.filters.append(filter_name)
-        return self
+    #def add_files(self, file_list: FileListBuilder):
+    #    self.files.append(file_list)
+    #    return self
 
     def add_link(self, link_name: str):
         self.links.append(link_name)
         return self
 
+    def cleanup_duplicates(self):
+        new_stuff = []
+        for entry in self.files:
+            if entry not in new_stuff:
+                new_stuff.append(entry)
 
-templates = {
-    'libavutil': TemplateBuilder('libavutil', '19216035-F781-4F15-B009-213B7E3A18AC').build(),
-    'libavcodec': TemplateBuilder('libavcodec', '9DB2830C-D326-48ED-B4CC-08EA6A1B7272').add_link("libavutil").build(),
-    'libavformat': TemplateBuilder('libavformat', '9DB2830C-D326-48ED-B4CC-08EA6A1B7273').build()
-}
-
+        self.files = new_stuff
 
 class Config:
     def __init__(self, os_type, architecture_type, config_h, premake_filters):
@@ -62,18 +122,6 @@ class Config:
         self.config_header_file_name = config_h
         self.premake_filters = premake_filters
         self.key_values = []
-
-
-supported_configs = [
-    Config('windows', 'x86_64', 'config_windows_x86_64.h', 'platforms:Windows'),
-    Config('linux', 'x86_64', 'config_linux_x86_64.h', 'platforms:Linux'),
-    Config('android', 'x86_64', 'config_android_x86_64.h', 'platforms:Android-x86_64'),
-    Config('android', 'aarch64', 'config_android_aarch64.h', 'platforms:Android-ARM64'),
-]
-
-
-def are_list_items_identical(list_a: set, list_b: set):
-    return list_a == list_b
 
 
 # gets the config defines from the generated header
@@ -91,8 +139,8 @@ def parse_config(file_path: str):
     return config
 
 
-def parse_configs():
-    for config in supported_configs:
+def parse_configs(configs):
+    for config in configs:
         config.key_values = parse_config(config.config_header_file_name)
 
 
@@ -205,141 +253,81 @@ def parse_makefile(fn, conf, g=None):
     return g
 
 
-def premake_files(files, libname):
-    # .o rule order from ffbuild:
-    extensions = [
-        '.c',
-        '.cpp',
-        '.m',
-        '.S',
-        '.asm',
-        '.rc',
-    ]
-    output_files_list = '  files({\n'
-    for file_name in files:
-        match = re.search('^(.*).o$', file_name)
-        if not match:
-            continue
+def is_header_in_fileblocks(header: str):
+    for file_block in file_blocks:
+        if header == file_block[0]:
+            return True
 
-        for ext in extensions:
-            f2 = match.group(1) + ext
-            if os.path.exists(os.path.join(libname, f2)):
-                f = f2
-                break
-        if file_name.endswith('.o'):
-            print('Error: could not resolve source for OBJ "{}".'.format(file_name))
-
-        output_files_list += '    "{}",\n'.format(file_name)
-
-    output_files_list += '  })\n'
-    return output_files_list
+    return False
 
 
-def premake_filter(filters=None):
-    output_str = '  filter({'
-
-    if filters:
-        output_str += '"{}"'.format(' or '.join(sorted(filters)))
-
-    output_str += '})\n'
-    return output_str
-
-
-MAKEFILE_FILE_NAME = 'Makefile'
-
-
-def generate_premake(configs, libname):
+def parse_makefiles_and_create_filters(configs: list[Config], lib_premake: PremakeFileBuilder):
     makefiles = {
-        os.path.join(libname, MAKEFILE_FILE_NAME): configs,
+        os.path.join(lib_premake.project_name, MAKEFILE_FILE_NAME): configs,
         # Original Makefiles are always included but since symbols are never used we can ignore them:
-        os.path.join(libname, 'aarch64', MAKEFILE_FILE_NAME):
+        os.path.join(lib_premake.project_name, 'aarch64', MAKEFILE_FILE_NAME):
             list(filter(lambda config: config.architecture_type == 'aarch64', configs)),
-        os.path.join(libname, 'x86', MAKEFILE_FILE_NAME):
-            list(filter(lambda config: config.architecture_type == 'x86_64', configs)),
+        os.path.join(lib_premake.project_name, 'x86', MAKEFILE_FILE_NAME):
+            list(filter(lambda config: config.architecture_type == 'x86_64', configs))
     }
 
-    # Makefile variables that contain source files - conditionals from arch.mak
-    file_blocks = [
-        ('HEADERS', None),
-        ('ARCH_HEADERS', None),
-        ('BUILT_HEADERS', None),
-        ('OBJS', None),
-
-        ('ARMV5TE-OBJS', 'HAVE_ARMV5TE'),
-        ('ARMV6-OBJS', 'HAVE_ARMV6'),
-        ('ARMV8-OBJS', 'HAVE_ARMV8'),
-        ('VFP-OBJS', 'HAVE_VFP'),
-        ('NEON-OBJS', 'HAVE_NEON'),
-
-        ('MMX-OBJS', 'HAVE_MMX'),
-        ('X86ASM-OBJS', 'HAVE_X86ASM'),
-    ]
-
     # Cache tree of parsed makefile variables
-    ms = {}
     for makefile_path in makefiles:
         if not os.path.exists(makefile_path):
             continue
 
-        ms2 = {}
         for config in configs:
-            ms2[config] = parse_makefile(makefile_path, config.key_values)
-        ms[makefile_path] = ms2
+            current_arch_files = FileListBuilder(makefile_path, config.premake_filters)
 
-    with open(os.path.join(libname, 'premake5.lua'), 'w') as premake:
-        premake.write(templates[libname])
+            makefile = parse_makefile(makefile_path, config.key_values)
+            for header in makefile:
+                if not is_header_in_fileblocks(header):
+                    continue
 
-        for makefile_path in makefiles:
-            premake.write('\n  -- {}:\n'.format(makefile_path.replace('\\', '/')))
+                filenames = ' '.join(makefile[header].split(" ")).split()
 
-            for file_block in file_blocks:
-                files = {}
+                # TODO: Somehow handle this exception better
+                # We have to convert .o files to .c files
+                if header == "OBJS":
+                    filenames = {filename.replace('.o', '.c') for filename in filenames}
 
-                for config in makefiles[makefile_path]:
-                    config.key_values = {}
-                    if file_block[1] and not file_block[1] in config.key_values:
-                        continue
+                # Sort items
+                sorted(filenames)
 
-                    m = ms[makefile_path][config]
-                    fb = file_block[0]
-                    for _ in range(2):
-                        if fb in m:
-                            for file in m[fb].split():
-                                if file not in files:
-                                    files[file] = {config}
-                                else:
-                                    files[file].add(config)
-                        fb += '-yes' # Evaluated conditionals
 
-                if len(files):
-                    # Get unique config groups
-                    config_sets = []
-                    for file_configs in files.values():
-                        is_new = True
-                        for config_set in config_sets:
-                            if config_set == file_configs:
-                                is_new = False
-                                break
-                        if is_new:
-                            config_sets.append(file_configs)
-                    # Make common files come first
-                    config_sets = sorted(config_sets, key=lambda x: -len(x))
+                for file_name in filenames:
+                    current_arch_files.add_file_to_block(header, file_name)
 
-                    premake.write('  --   {}:\n'.format(file_block[0]))
+            #current_arch_files.cleanup_duplicates()
+            lib_premake.files.append(current_arch_files)
 
-                    # Write file lists with applied filters
-                    filter_used = False
-                    for config_set in config_sets:
-                        if not config_set == configs: # no filter for common files
-                            filter_used = True
-                            premake.write(premake_filter([config.premake_filters for config in config_set]))
-                        premake.write(premake_files([filename for filename, file_configs in files.items() if config_set == file_configs], libname))
-                    if filter_used:
-                        premake.write(premake_filter())
+
+def generate_premake_file(lib_premake: PremakeFileBuilder):
+    premake_file_path = os.path.join(lib_premake.project_name, 'premake5.lua')
+
+    with open(premake_file_path, 'w') as premake:
+        premake.write(lib_premake.build())
 
 
 if __name__ == '__main__':
-    parse_configs()
+    configs = [
+        Config('windows', 'x86_64', 'config_windows_x86_64.h', 'platforms:Windows'),
+        Config('linux', 'x86_64', 'config_linux_x86_64.h', 'platforms:Linux'),
+        Config('android', 'x86_64', 'config_android_x86_64.h', 'platforms:Android-x86_64'),
+        Config('android', 'aarch64', 'config_android_aarch64.h', 'platforms:Android-ARM64'),
+    ]
 
-    for libname in templates:
-        generate_premake(supported_configs, libname)
+    parse_configs(configs)
+
+    lib_premake_to_generate = [
+        #PremakeFileBuilder('libavutil', '19216035-F781-4F15-B009-213B7E3A18AC'),
+        PremakeFileBuilder('libavcodec', '9DB2830C-D326-48ED-B4CC-08EA6A1B7272').add_link("libavutil"),
+        #PremakeFileBuilder('libavformat', 'CF5EF84C-894E-4D89-9D12-1F5ADE8CEB9E')
+    ]
+
+    for lib_premake in lib_premake_to_generate:
+        parse_makefiles_and_create_filters(configs, lib_premake)
+        # TODO: get_files_from_makefile
+        lib_premake.cleanup_duplicates()
+        generate_premake_file(lib_premake)
+
